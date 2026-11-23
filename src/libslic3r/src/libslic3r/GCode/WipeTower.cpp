@@ -388,6 +388,7 @@ public:
         if (time==0.f)
             return *this;
         m_gcode += "G4 S" + Slic3r::float_to_string_decimal_point(time, 3) + "\n";
+        m_elapsed_time += time;
 		return *this;
     }
 
@@ -1839,14 +1840,15 @@ static WipeTower::ToolChangeResult merge_tcr(WipeTower::ToolChangeResult& first,
     assert(first.new_tool == second.initial_tool);
     WipeTower::ToolChangeResult out = first;
     if (first.end_pos != second.start_pos) {
+        constexpr int travel_feedrate = 7200;
         out.gcode += "G1 X"
             + Slic3r::float_to_string_decimal_point(second.start_pos.x(), 3)
             + " Y"
             + Slic3r::float_to_string_decimal_point(second.start_pos.y(), 3)
-            + " F7200 "
+            + " F" + std::to_string(travel_feedrate) + " "
             + WipeTower::print_travel_tag()
             + "\n";
-        out.elapsed_time += (second.start_pos - first.end_pos).norm() / (7200.f / 60.f);
+        out.elapsed_time += (second.start_pos - first.end_pos).norm() / (travel_feedrate / 60.f);
     }
 
     out.gcode += second.gcode;

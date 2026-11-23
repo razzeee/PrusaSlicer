@@ -89,7 +89,7 @@ void update(Print& print, Domain::Model& model, const TestConfig& config,
     }
     auto preset_metadata = create_dummy_selected_preset_metadata(config.hw_config);
     auto metadata = Biz::Slicing::build_gcode_metadata({}, preset_metadata, config);
-    const auto result = print.update(
+    const Biz::Slicing::UpdateResult result = print.update(
         model,
         config,
         bed_instance,

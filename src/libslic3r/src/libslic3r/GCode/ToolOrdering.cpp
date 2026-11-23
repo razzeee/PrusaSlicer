@@ -1,7 +1,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
-#include "libslic3r/GCode/PurgeOrder.hpp"
+#include "Slic3r/PurgeOrder.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"

@@ -1,6 +1,8 @@
 #ifndef slic3r_PurgeOrder_hpp_
 #define slic3r_PurgeOrder_hpp_
 
+#include "libslic3r/GCode/ToolOrdering.hpp"
+
 #include <algorithm>
 #include <iterator>
 #include <limits>
@@ -11,8 +13,7 @@ namespace Slic3r {
 
 // Prefer the loaded filament, then the least expensive directed change. On
 // equal costs leave a tool needed by the next layer available to finish last.
-template<class Layers>
-void reorder_by_purge_volume(Layers &layers, const std::vector<std::vector<float>> &volume)
+inline void reorder_by_purge_volume(std::vector<LayerTools> &layers, const std::vector<std::vector<float>> &volume)
 {
     if (layers.empty() || layers.front().extruders.empty())
         return;

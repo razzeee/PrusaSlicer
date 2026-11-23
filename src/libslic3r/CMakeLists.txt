@@ -180,7 +180,7 @@ set(SLIC3R_SOURCES
     src/libslic3r/Format/SL1_SVG.hpp
     src/libslic3r/GCode/Thumbnails.hpp
     src/libslic3r/GCode/ToolOrdering.hpp
-    src/libslic3r/GCode/PurgeOrder.hpp
+    src/Slic3r/PurgeOrder.hpp
     src/libslic3r/GCode/WipeTower.hpp
     src/libslic3r/GCode.cpp
     src/libslic3r/GCode.hpp

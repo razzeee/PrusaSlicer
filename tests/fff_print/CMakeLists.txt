@@ -29,7 +29,7 @@ add_executable(${_TEST_NAME}_tests
     test_layers.cpp
 	test_model.cpp
 	test_multi.cpp
-	test_purge_order.cpp
+	../../src/libslic3r/test/PurgeOrderTests.cpp
 	test_perimeters.cpp
 	test_print.cpp
 	test_printgcode.cpp

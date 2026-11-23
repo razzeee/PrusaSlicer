@@ -2225,9 +2225,9 @@ std::optional<WipeTowerData> Print::generate_wipe_tower_data()
             candidate.toolchanges_count() <= m_tool_ordering.toolchanges_count()) {
             double reference_filament;
             double candidate_filament;
-            auto reference = generate_wipe_tower_for_order(*this, m_tool_ordering, wipe_volumes, &reference_filament);
+            WipeTowerData reference = generate_wipe_tower_for_order(*this, m_tool_ordering, wipe_volumes, &reference_filament);
             this->throw_if_canceled();
-            auto alternative = generate_wipe_tower_for_order(*this, candidate, wipe_volumes, &candidate_filament);
+            WipeTowerData alternative = generate_wipe_tower_for_order(*this, candidate, wipe_volumes, &candidate_filament);
             // Include the tower's fill and perimeters, not just nominal purge
             // volumes. The eligible materials have equal diameter and density.
             auto tower_time = [](const WipeTowerData &data) {
