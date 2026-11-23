@@ -1846,9 +1846,11 @@ static WipeTower::ToolChangeResult merge_tcr(WipeTower::ToolChangeResult& first,
             + " F7200 "
             + WipeTower::print_travel_tag()
             + "\n";
+        out.elapsed_time += (second.start_pos - first.end_pos).norm() / (7200.f / 60.f);
     }
 
     out.gcode += second.gcode;
+    out.elapsed_time += second.elapsed_time;
     out.extrusions.insert(out.extrusions.end(), second.extrusions.begin(), second.extrusions.end());
     out.end_pos = second.end_pos;
     out.wipe_path = second.wipe_path;

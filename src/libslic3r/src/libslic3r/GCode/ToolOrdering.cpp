@@ -1,6 +1,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/GCode/PurgeOrder.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -129,6 +130,11 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
 // For the use case when all objects are printed at once.
 // (print.config().complete_objects is false).
 ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool prime_multi_material)
+    : ToolOrdering(print, first_extruder, prime_multi_material, {})
+{}
+
+ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool prime_multi_material,
+                           const std::vector<std::vector<float>> &purge_volumes)
 {
     m_print_config_ptr = &print.config();
 
@@ -182,6 +188,8 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
     // Reorder the extruders to minimize tool switches.
     this->reorder_extruders(first_extruder);
 
+    if (!purge_volumes.empty())
+        reorder_by_purge_volume(m_layer_tools, purge_volumes);
     this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
 
     if (this->insert_wipe_tower_extruder()) {

@@ -17,6 +17,7 @@
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "Slic3r/Biz/Crypto/Hash.hpp"
 #include "libslic3r/GCode/ConflictChecker.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/BuildVolume.hpp"
@@ -34,7 +35,9 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <numeric>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <boost/filesystem/path.hpp>
@@ -2084,9 +2087,78 @@ bool is_toolchange_required(
     return false;
 }
 
+static WipeTowerData generate_wipe_tower_for_order(const Print &print, ToolOrdering &ordering,
+                                                   const std::vector<std::vector<float>> &wipe_volumes,
+                                                   double *total_filament = nullptr);
+
+static bool can_optimize_purge_order(const Print &print, const ToolOrdering &ordering)
+{
+    const auto &config = print.config();
+    const auto uniform = [](const auto &values) {
+        return std::adjacent_find(values.begin(), values.end(), std::not_equal_to<>()) == values.end();
+    };
+    const auto supported_hooks = [](const std::vector<std::string> &hooks) {
+        for (const auto &hook : hooks) {
+            if (hook == "M142 S36 ; set heatbreak target temp")
+                continue;
+            // Legacy Prusa PLA filament macros only set pressure advance and
+            // heatbreak temperature. Modified macros can extrude on a reload.
+            if (hook.starts_with("M900 K")) {
+                const auto digest = Biz::Crypto::compute_hash(Biz::Crypto::as_bytes_view(hook)).hex_string();
+                if (digest == "1584f8038ab6a765141c2fba96485a09860b2482162ce2bfcb3b38c37857f643" ||
+                    digest == "25144449c0b8a5ec2877afc76c26f963c6f70da605f3b3a3ab4f196b0b57253d")
+                    continue;
+            }
+            // Placeholder expansion happens before G-code comments are parsed.
+            if (hook.find_first_of("{[") != std::string::npos)
+                return false;
+            std::istringstream lines(hook);
+            for (std::string line; std::getline(lines, line);) {
+                const auto first = line.find_first_not_of(" \t\r");
+                if (first != std::string::npos && line[first] != ';')
+                    return false;
+            }
+        }
+        return true;
+    };
+    const auto supported_machine = [&]() {
+        // Layer hooks may extrude based on current_extruder. Match the whole
+        // reviewed machine program rather than trusting a preset's name.
+        std::string program;
+        for (const char *key : {"printer_model", "layer_gcode", "before_layer_gcode",
+                                "start_gcode", "end_gcode", "between_objects_gcode"}) {
+            program += config.get<std::string>(key);
+            program += '\0';
+        }
+        const auto digest = Biz::Crypto::compute_hash(Biz::Crypto::as_bytes_view(program)).hex_string();
+        return digest == "a3b2f685d29caa3f85557d6e518116b8b3a306ab1f13a3b53bd65be4e6049bff" || // MK4 MMU3
+               digest == "42e969ce1d8c5c688b590f44c03b019a6c90c982ca392a15a6023b8e4f2f2b0b" || // legacy MK4 MMU3
+               digest == "40b2bde8dc74175005c8e4adf486ee07c7eb3f78c68fd3a1411697023bdac9c7";   // MK3S MMU2S
+    };
+    return config.get<bool>("single_extruder_multi_material") &&
+           config.get<Domain::ToolChangeOrderingType>("toolchange_ordering") == Domain::ToolChangeOrderingType::Optimized &&
+           config.get<int>("wipe_tower_extruder") == 0 &&
+           (!print.custom_gcode() || print.custom_gcode()->get().gcodes.empty()) &&
+           config.get<std::string>("toolchange_gcode").empty() &&
+           config.get<std::vector<std::string>>("gcode_substitutions").empty() &&
+           config.get<std::vector<std::string>>("post_process").empty() &&
+           supported_machine() &&
+           supported_hooks(config.get<std::vector<std::string>>("start_filament_gcode")) &&
+           supported_hooks(config.get<std::vector<std::string>>("end_filament_gcode")) &&
+           uniform(config.get<std::vector<double>>("filament_density")) &&
+           uniform(config.get<std::vector<double>>("filament_diameter")) &&
+           uniform(config.get<std::vector<bool>>("filament_soluble")) &&
+           uniform(config.get<std::vector<std::string>>("filament_ramming_parameters")) &&
+           std::none_of(print.objects().begin(), print.objects().end(), [](const PrintObject *object) {
+               return object->config().get<Domain::SeamPosition>("seam_position") == Domain::SeamPosition::spNearest;
+           }) &&
+           std::none_of(ordering.begin(), ordering.end(), [](const LayerTools &layer) {
+               return layer.has_support || layer.wiping_extrusions().is_anything_overridable();
+           });
+}
+
 std::optional<WipeTowerData> Print::generate_wipe_tower_data()
 {
-    WipeTowerData result;
     if (! this->can_have_wipe_tower())
         return std::nullopt;
 
@@ -2136,43 +2208,81 @@ std::optional<WipeTowerData> Print::generate_wipe_tower_data()
     }
     this->throw_if_canceled();
 
+    if (can_optimize_purge_order(*this, m_tool_ordering)) {
+        ToolOrdering candidate(*this, (unsigned)-1, true, wipe_volumes);
+        if (candidate.all_extruders() == m_tool_ordering.all_extruders() &&
+            candidate.last_extruder() == m_tool_ordering.last_extruder() &&
+            !std::equal(candidate.begin(), candidate.end(), m_tool_ordering.begin(), m_tool_ordering.end(),
+                        [](const LayerTools &a, const LayerTools &b) { return a.extruders == b.extruders; }) &&
+            candidate.toolchanges_count() <= m_tool_ordering.toolchanges_count()) {
+            double reference_filament, candidate_filament;
+            auto reference = generate_wipe_tower_for_order(*this, m_tool_ordering, wipe_volumes, &reference_filament);
+            this->throw_if_canceled();
+            auto alternative = generate_wipe_tower_for_order(*this, candidate, wipe_volumes, &candidate_filament);
+            // Include the tower's fill and perimeters, not just nominal purge
+            // volumes. The eligible materials have equal diameter and density.
+            auto tower_time = [](const WipeTowerData &data) {
+                double seconds = data.final_purge->elapsed_time;
+                for (const auto &layer : data.tool_changes)
+                    for (const auto &change : layer)
+                        seconds += change.elapsed_time;
+                return seconds;
+            };
+            const double seconds = tower_time(alternative);
+            const double reference_seconds = tower_time(reference);
+            if (candidate_filament < reference_filament && std::isfinite(seconds) &&
+                std::isfinite(reference_seconds) && seconds <= reference_seconds) {
+                m_tool_ordering = std::move(candidate);
+                return alternative;
+            }
+            return reference;
+        }
+    }
+    return generate_wipe_tower_for_order(*this, m_tool_ordering, wipe_volumes);
+}
+
+static WipeTowerData generate_wipe_tower_for_order(const Print &print, ToolOrdering &ordering,
+                                                   const std::vector<std::vector<float>> &wipe_volumes,
+                                                   double *total_filament)
+{
+    WipeTowerData result;
     // Initialize the wipe tower.
     WipeTower wipe_tower(
-        this->wipe_tower()->position.cast<float>(),
-        this->wipe_tower()->rotation,
-        m_config,
+        print.wipe_tower()->position.cast<float>(),
+        print.wipe_tower()->rotation,
+        print.config(),
         wipe_volumes,
-        m_tool_ordering.first_extruder(),
-        m_extruder_candidates
+        ordering.first_extruder(),
+        print.get_extruder_candidates()
     );
 
     // Set the extruder & material properties at the wipe tower object.
-    for (size_t i = 0; i < m_config.hw_config().material_slot_count(); ++ i)
-        wipe_tower.set_extruder(i, m_config);
+    for (size_t i = 0; i < print.config().hw_config().material_slot_count(); ++ i)
+        wipe_tower.set_extruder(i, print.config());
 
     result.priming = std::make_unique<std::vector<WipeTower::ToolChangeResult>>(
-        wipe_tower.prime((float)this->skirt_first_layer_height(), m_tool_ordering.all_extruders(), false));
+        wipe_tower.prime((float)print.skirt_first_layer_height(), ordering.all_extruders(), false));
 
     // Lets go through the wipe tower layers and determine pairs of extruder changes for each
     // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
     {
-        unsigned int current_extruder_id = m_tool_ordering.all_extruders().back();
-        for (auto &layer_tools : m_tool_ordering.layer_tools()) { // for all layers
+        unsigned int current_extruder_id = ordering.all_extruders().back();
+        for (auto &layer_tools : ordering.layer_tools()) { // for all layers
             if (!layer_tools.has_wipe_tower) continue;
             wipe_tower.plan_toolchange((float)layer_tools.print_z, (float)layer_tools.wipe_tower_layer_height, current_extruder_id, current_extruder_id, false);
             for (const auto extruder_id : layer_tools.extruders) {
-                const bool first_layer{&layer_tools == &m_tool_ordering.front()};
-                const unsigned last_extruder_id{m_tool_ordering.all_extruders().back()};
+                const bool first_layer{&layer_tools == &ordering.front()};
+                const unsigned last_extruder_id{ordering.all_extruders().back()};
                 if (is_toolchange_required(first_layer, last_extruder_id, extruder_id, current_extruder_id)) {
                     float volume_to_wipe = wipe_volumes[current_extruder_id][extruder_id];             // total volume to wipe after this toolchange
                     // Not all of that can be used for infill purging:
-                    volume_to_wipe -= (float)m_config.get<std::vector<double>>("filament_minimal_purge_on_wipe_tower").at(extruder_id);
+                    volume_to_wipe -= (float)print.config().get<std::vector<double>>("filament_minimal_purge_on_wipe_tower").at(extruder_id);
 
                     // try to assign some infills/objects for the wiping:
-                    volume_to_wipe = layer_tools.wiping_extrusions_nonconst().mark_wiping_extrusions(*this, layer_tools, current_extruder_id, extruder_id, volume_to_wipe);
+                    volume_to_wipe = layer_tools.wiping_extrusions_nonconst().mark_wiping_extrusions(print, layer_tools, current_extruder_id, extruder_id, volume_to_wipe);
 
                     // add back the minimal amount toforce on the wipe tower:
-                    volume_to_wipe += (float)m_config.get<std::vector<double>>("filament_minimal_purge_on_wipe_tower").at(extruder_id);
+                    volume_to_wipe += (float)print.config().get<std::vector<double>>("filament_minimal_purge_on_wipe_tower").at(extruder_id);
 
                     // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
                     wipe_tower.plan_toolchange((float)layer_tools.print_z, (float)layer_tools.wipe_tower_layer_height,
@@ -2180,14 +2290,14 @@ std::optional<WipeTowerData> Print::generate_wipe_tower_data()
                     current_extruder_id = extruder_id;
                 }
             }
-            layer_tools.wiping_extrusions_nonconst().ensure_perimeters_infills_order(*this, layer_tools);
-            if (&layer_tools == &m_tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
+            layer_tools.wiping_extrusions_nonconst().ensure_perimeters_infills_order(print, layer_tools);
+            if (&layer_tools == &ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
                 break;
         }
     }
 
     // Generate the wipe tower layers.
-    result.tool_changes.reserve(m_tool_ordering.layer_tools().size());
+    result.tool_changes.reserve(ordering.layer_tools().size());
     wipe_tower.generate(result.tool_changes);
     result.depth = wipe_tower.get_depth();
     result.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
@@ -2195,29 +2305,31 @@ std::optional<WipeTowerData> Print::generate_wipe_tower_data()
     result.height = wipe_tower.get_wipe_tower_height();
 
     // Unload the current filament over the purge tower.
-    double layer_height = m_objects.front()->config().get<double>("layer_height");
-    if (m_tool_ordering.back().wipe_tower_partitions > 0) {
+    double layer_height = print.objects().front()->config().get<double>("layer_height");
+    if (ordering.back().wipe_tower_partitions > 0) {
         // The wipe tower goes up to the last layer of the print.
         if (wipe_tower.layer_finished()) {
             // The wipe tower is printed to the top of the print and it has no space left for the final extruder purge.
             // Lift Z to the next layer.
-            wipe_tower.set_layer(float(m_tool_ordering.back().print_z + layer_height), float(layer_height));
+            wipe_tower.set_layer(float(ordering.back().print_z + layer_height), float(layer_height));
         } else {
             // There is yet enough space at this layer of the wipe tower for the final purge.
         }
     } else {
         // The wipe tower does not reach the last print layer, perform the pruge at the last print layer.
-        assert(m_tool_ordering.back().wipe_tower_partitions == 0);
-        wipe_tower.set_layer(float(m_tool_ordering.back().print_z), float(layer_height));
+        assert(ordering.back().wipe_tower_partitions == 0);
+        wipe_tower.set_layer(float(ordering.back().print_z), float(layer_height));
     }
     result.final_purge = std::make_unique<WipeTower::ToolChangeResult>(
         wipe_tower.tool_change((unsigned int)(-1)));
+    if (total_filament)
+        *total_filament = std::accumulate(wipe_tower.used_filament().begin(), wipe_tower.used_filament().end(), 0.);
 
     result.used_filament_until_layer = wipe_tower.get_used_filament_until_layer();
     result.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
     result.width = wipe_tower.width();
 
-    result.first_layer_height = config().get<Domain::FloatOrPercentage>("first_layer_height").get_abs_value(layer_height);
+    result.first_layer_height = print.config().get<Domain::FloatOrPercentage>("first_layer_height").get_abs_value(layer_height);
     result.cone_x_scale = wipe_tower.get_wipe_tower_cone_x_scale();
     result.cone_radius = wipe_tower.get_wipe_tower_cone_radius();
 

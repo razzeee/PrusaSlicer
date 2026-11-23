@@ -62,6 +62,7 @@ public:
     void ensure_perimeters_infills_order(const Print& print, const LayerTools& lt);
 
     void set_something_overridable() { m_something_overridable = true; }
+    bool is_anything_overridable() const { return m_something_overridable; }
 
 private:
     // This function is called from mark_wiping_extrusions and sets extruder that it should be printed with (-1 .. as usual)
@@ -145,6 +146,8 @@ public:
     // For the use case when all objects are printed at once.
     // (print.config.complete_objects is false).
     ToolOrdering(const Print &print, unsigned int first_extruder, bool prime_multi_material = false);
+    ToolOrdering(const Print &print, unsigned int first_extruder, bool prime_multi_material,
+                 const std::vector<std::vector<float>> &purge_volumes);
 
     void 				clear() { m_layer_tools.clear(); }
 
