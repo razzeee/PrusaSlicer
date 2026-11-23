@@ -87,17 +87,16 @@ void update(Print& print, Domain::Model& model, const TestConfig& config,
             bed_instance.model_instances.push_back(instance);
         }
     }
-    auto preset_metadata = create_dummy_selected_preset_metadata(
-        create_dummy_hw_config(config.tool.size())
-    );
+    auto preset_metadata = create_dummy_selected_preset_metadata(config.hw_config);
     auto metadata = Biz::Slicing::build_gcode_metadata({}, preset_metadata, config);
-    print.update(
+    const auto result = print.update(
         model,
         config,
         bed_instance,
         preset_metadata,
         Biz::Slicing::build_metadata_serializer(metadata, preset_metadata, config)
     );
+    REQUIRE_FALSE(std::holds_alternative<Biz::Slicing::ApplyStatus::InvalidData>(result.status));
 }
 } // namespace
 
@@ -107,6 +106,8 @@ TEST_CASE("Rebuild cached MMU tower and first-layer hull after eligibility chang
     Domain::Model model;
     TestConfig config{2};
     config.print.items.opt("infill_extruder").set(2);
+    config.print.items.opt("support_material_extruder").set(0);
+    config.print.items.opt("support_material_interface_extruder").set(0);
     config.print.items.opt("wipe_tower").set(true);
     config.printer.items.opt("single_extruder_multi_material").set(true);
     config.printer.items.opt("use_relative_e_distances").set(true);
