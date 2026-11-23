@@ -808,6 +808,10 @@ FDMPrintSteps get_custom_gcode_invalidated_steps(
         if (!current || !next) {
             return order_differs_invalidated_steps;
         }
+        // Any scheduled event disables purge-volume ordering, including a
+        // pause that does not itself request a particular tool.
+        if (current->gcodes.empty() != next->gcodes.empty())
+            return order_differs_invalidated_steps;
         const bool color_change_differ{custom_per_printz_gcodes_tool_changes_differ(
             current->gcodes,
             next->gcodes,
@@ -1680,7 +1684,7 @@ Biz::Slicing::UpdateResult Print::apply(
             InvalidatedSteps{}
     };
 
-    const InvalidatedSteps invalidated_steps{SlicingSync::merge(
+    InvalidatedSteps invalidated_steps{SlicingSync::merge(
         {hw_config_invalidated_steps,
          wipe_tower_invalidated_steps,
          custom_gcode_invalidated_steps,
@@ -1690,6 +1694,11 @@ Biz::Slicing::UpdateResult Print::apply(
          virtual_extruders_invalidated_steps}
     )};
 
+    // The skirt and the first-layer hull include the wipe tower corners.
+    if (can_have_wipe_tower() || could_have_had_wipe_tower) {
+        if (auto* steps = std::get_if<FDMPrintSteps>(&invalidated_steps.print); steps && steps->contains(psWipeTower))
+            steps->insert(psSkirtBrim);
+    }
     if (can_have_wipe_tower()) {
         ASSERT(m_wipe_tower);
         const bool wipe_tower_invalidated{std::visit(

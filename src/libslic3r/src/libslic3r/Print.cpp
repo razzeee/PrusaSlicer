@@ -2136,6 +2136,8 @@ static bool can_optimize_purge_order(const Print &print, const ToolOrdering &ord
                digest == "40b2bde8dc74175005c8e4adf486ee07c7eb3f78c68fd3a1411697023bdac9c7";   // MK3S MMU2S
     };
     return config.get<bool>("single_extruder_multi_material") &&
+           !print.has_skirt() &&
+           !config.get<bool>("wipe_tower_no_sparse_layers") &&
            config.get<Domain::ToolChangeOrderingType>("toolchange_ordering") == Domain::ToolChangeOrderingType::Optimized &&
            config.get<int>("wipe_tower_extruder") == 0 &&
            (!print.custom_gcode() || print.custom_gcode()->get().gcodes.empty()) &&
@@ -2145,6 +2147,12 @@ static bool can_optimize_purge_order(const Print &print, const ToolOrdering &ord
            supported_machine() &&
            supported_hooks(config.get<std::vector<std::string>>("start_filament_gcode")) &&
            supported_hooks(config.get<std::vector<std::string>>("end_filament_gcode")) &&
+           // Changing travel or reload counts can also dispense plastic outside
+           // the tower if de-retraction adds more than the retracted length.
+           !config.get<bool>("use_firmware_retraction") &&
+           std::ranges::all_of(config.get<std::vector<double>>("retract_restart_extra"), [](double e) { return e == 0.; }) &&
+           std::ranges::all_of(config.get<std::vector<double>>("retract_restart_extra_toolchange"), [](double e) { return e == 0.; }) &&
+           uniform(config.get<std::vector<double>>("extrusion_multiplier")) &&
            uniform(config.get<std::vector<double>>("filament_density")) &&
            uniform(config.get<std::vector<double>>("filament_diameter")) &&
            uniform(config.get<std::vector<bool>>("filament_soluble")) &&
@@ -2215,7 +2223,8 @@ std::optional<WipeTowerData> Print::generate_wipe_tower_data()
             !std::equal(candidate.begin(), candidate.end(), m_tool_ordering.begin(), m_tool_ordering.end(),
                         [](const LayerTools &a, const LayerTools &b) { return a.extruders == b.extruders; }) &&
             candidate.toolchanges_count() <= m_tool_ordering.toolchanges_count()) {
-            double reference_filament, candidate_filament;
+            double reference_filament;
+            double candidate_filament;
             auto reference = generate_wipe_tower_for_order(*this, m_tool_ordering, wipe_volumes, &reference_filament);
             this->throw_if_canceled();
             auto alternative = generate_wipe_tower_for_order(*this, candidate, wipe_volumes, &candidate_filament);

@@ -76,10 +76,12 @@ SCENARIO("Print: Skirt generation", "[Print]") {
 }
 
 namespace {
-void update(Print& print, Domain::Model& model, const TestConfig& config)
+void update(Print& print, Domain::Model& model, const TestConfig& config,
+            std::optional<Domain::CustomGCode::Info> events = {})
 {
     Domain::Bed model_bed;
     Domain::BedInstance bed_instance{model_bed};
+    bed_instance.custom_gcode = std::move(events);
     for (const Domain::ModelObject* object : model.objects) {
         for (Domain::ModelInstance* instance : object->instances) {
             bed_instance.model_instances.push_back(instance);
@@ -98,6 +100,35 @@ void update(Print& print, Domain::Model& model, const TestConfig& config)
     );
 }
 } // namespace
+
+TEST_CASE("Rebuild cached MMU tower and first-layer hull after eligibility changes", "[PrintApply]")
+{
+    Print print;
+    Domain::Model model;
+    TestConfig config{2};
+    config.print.items.opt("infill_extruder").set(2);
+    config.print.items.opt("wipe_tower").set(true);
+    config.printer.items.opt("single_extruder_multi_material").set(true);
+    config.printer.items.opt("use_relative_e_distances").set(true);
+    config.printer.items.opt("layer_gcode").set(std::string{"G92 E0"});
+    config.project.items.opt("wiping_volumes_matrix").set(std::vector<double>{0., 100., 120., 0.});
+    Test::init_print({TestMesh::cube_20x20x20}, print, model, config);
+    Domain::CustomGCode::Info events{Domain::CustomGCode::Mode::MultiAsSingle, {}};
+    update(print, model, config, events);
+    print.process();
+    REQUIRE(print.wipe_tower_data().has_value());
+    REQUIRE(print.is_step_done(psWipeTower));
+    REQUIRE(print.is_step_done(psSkirtBrim));
+    SECTION("Adding a pause to the existing empty schedule") {
+        events.gcodes.push_back({0.4, Domain::CustomGCode::Type::PausePrint, 0, {}, {}});
+    }
+    SECTION("Editing the layer hook") {
+        config.printer.items.opt("before_layer_gcode").set(std::string{"G1 E1"});
+    }
+    update(print, model, config, events);
+    CHECK_FALSE(print.is_step_done(psWipeTower));
+    CHECK_FALSE(print.is_step_done(psSkirtBrim));
+}
 
 SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces to become internal.", "[Print]") {
     GIVEN("sliced 20mm cube and config with top_solid_surfaces = 2 and bottom_solid_surfaces = 1") {
